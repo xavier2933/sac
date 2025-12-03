@@ -210,7 +210,7 @@ def main():
     # Training args
     parser.add_argument('--total-timesteps', type=int, default=100000,
                         help='Total training timesteps')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
+    parser.add_argument('--learning-rate', type=float, default=1e-4,
                         help='Learning rate')
     parser.add_argument('--buffer-size', type=int, default=100000,
                         help='Replay buffer size')
@@ -224,9 +224,9 @@ def main():
                         help='Discount factor')
     parser.add_argument('--train-freq', type=int, default=1,
                         help='Update frequency')
-    parser.add_argument('--gradient-steps', type=int, default=1,
+    parser.add_argument('--gradient-steps', type=int, default=4,
                         help='Gradient steps per update')
-    parser.add_argument('--ent-coef', type=str, default='auto',
+    parser.add_argument('--ent-coef', type=str, default=0.2,
                         help='Entropy coefficient (auto or float)')
     
     # Logging args

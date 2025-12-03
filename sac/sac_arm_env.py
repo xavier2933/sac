@@ -6,14 +6,17 @@ import gymnasium as gym
 from gymnasium import spaces
 
 class SimpleReachReward:
-    """Same reward function as Dreamer setup."""
     def __init__(self, target_pos=np.array([0.1, 0.35, 0.35])):
         self.target_pos = np.array(target_pos)
-        self.best_distance = float('inf') 
+        self.prev_distance = None
+        self.episode_min_distance = float('inf')  # ← Add this
 
     def reset(self):
         print("[SimpleReachReward] Target:", self.target_pos)
-        self.best_distance = float('inf')
+        if self.episode_min_distance != float('inf'):
+            print(f"[SimpleReachReward] Episode best distance: {self.episode_min_distance*100:.2f}cm")
+        self.prev_distance = None
+        self.episode_min_distance = float('inf')
 
     def __call__(self, obs):
         if 'actual_pose' not in obs:
@@ -24,29 +27,25 @@ class SimpleReachReward:
         
         reward = 0.0
 
-        # 1. Exponential Proximity
+        # 1. Exponential Proximity (Markovian ✓)
         proximity = np.exp(-10.0 * distance)
         reward += proximity
         
-        # 2. Progress Bonus
-        if distance < self.best_distance:
-            if self.best_distance != float('inf'):
-                progress_bonus = 1.0 * (self.best_distance - distance)
-                reward += progress_bonus
-                
-            self.best_distance = distance
+        # 2. Progress Bonus (now Markovian)
+        if self.prev_distance is not None:
+            progress = self.prev_distance - distance
+            reward += 5.0 * progress  # Scale up since it's now step-to-step
         
-        # 3. Hold Bonus
-        hold_bonus = 0.0
-        if distance < 0.04:  # within 4 cm
-            hold_bonus += 0.1
+        self.prev_distance = distance
         
-        reward += hold_bonus
-
-        # 4. Final Success Bonuses
-        if distance < 0.02:  # within 2 cm
+        # 3. Hold Bonus (Markovian ✓)
+        if distance < 0.04:
+            reward += 0.1
+        
+        # 4. Success Bonuses (Markovian ✓)
+        if distance < 0.02:
             reward += 1.0
-        if distance < 0.01:  # within 1 cm
+        if distance < 0.01:
             reward += 2.0
             
         return float(reward)

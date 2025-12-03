@@ -137,6 +137,7 @@ class SACRosBridge(Node):
         self.get_logger().info("🤖 SAC ROS bridge ready.")
         self.get_logger().info(f"   Position delta scale: {self.position_delta_scale*100:.1f}cm per unit")
         self.get_logger().info(f"   Wrist delta scale: {self.wrist_delta_scale:.1f}° per unit")
+        
 
     def __del__(self):
         """Close file handles on destruction."""
