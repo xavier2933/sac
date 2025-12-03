@@ -114,10 +114,10 @@ class SACRosBridge(Node):
         ctx = zmq.Context()
         # Bridge publishes observations on 5558
         self.pub = ctx.socket(zmq.PUB)
-        self.pub.bind("tcp://127.0.0.1:5558")
+        self.pub.bind("tcp://127.0.0.1:5556")
         # Bridge receives actions on 5559
         self.sub = ctx.socket(zmq.SUB)
-        self.sub.bind("tcp://127.0.0.1:5559")
+        self.sub.bind("tcp://127.0.0.1:5557")
         self.sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
         self.timer = self.create_timer(0.1, self.timer_callback)
@@ -281,25 +281,25 @@ class SACRosBridge(Node):
     # --- Timer and Action Publishing ---
     
     def timer_callback(self):
-        # Initialize start pose if needed
+        # Try to initialize start pose if not done yet
         if self.current_target_pos is None:
             self.get_start_pose()
 
-        # Send observations to SAC agent
+        # Send observations to SAC - EXACTLY like Dreamer
         if self.obs_cache:
             msg = json.dumps(self.obs_cache)
             self.pub.send_string(msg)
             
-            required = ["arm_joints", "block_pose", "actual_pose", "wrist_angle", 
-                        "gripper_state", "left_contact", "right_contact"]
+            required = ["arm_joints", "actual_pose"]
             if all(k in self.obs_cache for k in required) and "_logged_complete" not in self.received_topics:
-                self.get_logger().info("✓ Sending complete observation set to SAC")
+                self.get_logger().info("✓ Sending observations to SAC (arm_joints + actual_pose)")
                 self.received_topics.add("_logged_complete")
 
         # Receive actions from SAC agent
         try:
             while self.sub.poll(timeout=0):
                 msg_str = self.sub.recv_string(flags=zmq.NOBLOCK)
+                # print(f"[Bridge] DEBUG: Received message: {msg_str}")
                 data = json.loads(msg_str)
                 
                 if "reset" in data and data["reset"]:
@@ -308,18 +308,26 @@ class SACRosBridge(Node):
                     false_msg = Bool()
                     false_msg.data = False
 
+                    # 1. Publish false immediately
                     self.pub_aut.publish(false_msg)
+
+                    # 2. Wait 0.5 seconds
                     time.sleep(0.5)
+
+                    # 3. Publish TRUE reset
                     self.pub_reset.publish(reset_msg)
                     self.get_logger().info("↻ Reset command sent")
+
+                    # 4. Wait 3 seconds before allowing actions again
                     time.sleep(3.0)
                     self.pub_aut.publish(reset_msg)
 
-                    # Clear states
+                    # 5. Clear states to force re-sync
                     self.current_target_pos = None
                     self.current_wrist = None
                     self.current_gripper = 0.0
-                    self.get_logger().info("↻ Reset complete")
+
+                    self.get_logger().info("↻ Reset complete - observations will continue") 
                     
                 if "action" in data:
                     action = np.array(data["action"], dtype=np.float32)

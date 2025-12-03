@@ -55,11 +55,12 @@ class SimpleReachReward:
 class SACRobotArmEnv(gym.Env):
     """
     Gymnasium wrapper for real robot arm with SAC.
-    Maintains same interface and reward function as Dreamer setup.
+    MASKED VERSION: Only uses joint positions (6) and actual end-effector pose (7).
+    Total observation dimension: 13
     """
     metadata = {'render.modes': []}
     
-    def __init__(self, ip='127.0.0.1', port_sub=5558, port_pub=5559, hz=10.0):
+    def __init__(self, ip='127.0.0.1', port_sub=5556, port_pub=5557, hz=10.0):
         super().__init__()
         
         self.hz = hz
@@ -85,18 +86,25 @@ class SACRobotArmEnv(gym.Env):
         self.sub = self.ctx.socket(zmq.SUB)
         self.sub.connect(f"tcp://{ip}:{port_sub}")
         self.sub.setsockopt_string(zmq.SUBSCRIBE, "")
+        # Set timeout to avoid infinite blocking
+        self.sub.setsockopt(zmq.RCVTIMEO, 5000)  # 5 second timeout
         
         # Publish actions to bridge (bridge subscribes on 5559)
         self.pub = self.ctx.socket(zmq.PUB)
         self.pub.connect(f"tcp://{ip}:{port_pub}")
         
+        # ZMQ needs time to establish connections
+        print("[SACRobotArmEnv] Waiting for ZMQ connection to stabilize...")
+        time.sleep(1.0)
+        print("[SACRobotArmEnv] Connection ready")
+        
         # State tracking
         self.step_count = 0
-        self.max_episode_steps = 500  # Configurable episode length
+        self.max_episode_steps = 500
         
-        # Define Gym spaces
-        # Observation: [arm_joints(6) + actual_pose(7) + wrist(1) + gripper(1) + contacts(2)]
-        obs_dim = 6 + 7 + 1 + 1 + 2  # = 17
+        # Define Gym spaces - MASKED VERSION
+        # Observation: [arm_joints(6) + actual_pose(7)] = 13 dimensions
+        obs_dim = 6 + 7  # MASKED: Only joint positions and actual pose
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
@@ -104,59 +112,97 @@ class SACRobotArmEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Action: [dx, dy, dz, dwrist, dgrip] normalized to [-1, 1]
+        # Action: [dx, dy, dz] normalized to [-1, 1]
         self.action_space = spaces.Box(
             low=-1.0, 
             high=1.0, 
-            shape=(5,), 
+            shape=(3,), 
             dtype=np.float32
         )
         
-        print(f"[SACRobotArmEnv] Initialized")
+        print(f"[SACRobotArmEnv] Initialized (MASKED: joints + pose only)")
         print(f"  Observation space: {self.observation_space.shape}")
         print(f"  Action space: {self.action_space.shape}")
 
-    def _receive_obs(self):
-        """Blocking receive of observation from bridge."""
-        while True:
+    def _receive_obs(self, clear_stale=True):
+        """
+        Receive observation from bridge.
+        
+        Args:
+            clear_stale: If True, drain all queued messages and get the most recent one.
+                        This ensures we always get fresh observations at ~10Hz.
+        """
+        if clear_stale:
+            # Drain all stale messages to get the most recent observation
+            latest_msg = None
+            cleared = 0
+            
+            # Set short timeout for draining
+            self.sub.setsockopt(zmq.RCVTIMEO, 100)
+            
+            try:
+                # Keep reading until we hit timeout (no more messages)
+                while True:
+                    try:
+                        latest_msg = self.sub.recv_string(flags=zmq.NOBLOCK)
+                        cleared += 1
+                    except zmq.Again:
+                        break
+            finally:
+                # Restore normal timeout
+                self.sub.setsockopt(zmq.RCVTIMEO, 5000)
+            
+            # If we got at least one message, use the latest
+            if latest_msg is not None:
+                obs_dict = json.loads(latest_msg)
+                required = ['arm_joints', 'actual_pose']
+                if all(k in obs_dict for k in required):
+                    return obs_dict
+        
+        # Fallback: blocking receive with retries
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
                 msg_str = self.sub.recv_string()
                 obs_dict = json.loads(msg_str)
                 
                 # Check for required keys
-                required = ['arm_joints', 'actual_pose', 'wrist_angle',
-                           'gripper_state', 'left_contact', 'right_contact']
+                required = ['arm_joints', 'actual_pose']
                 if all(k in obs_dict for k in required):
                     return obs_dict
+                else:
+                    missing = [k for k in required if k not in obs_dict]
+                    print(f"[SACRobotArmEnv] Missing required keys: {missing}, retrying...")
+                    retry_count += 1
+                    
+            except zmq.Again:
+                print(f"[SACRobotArmEnv] Timeout waiting for observations (attempt {retry_count+1}/{max_retries})")
+                retry_count += 1
+                time.sleep(1.0)
             except Exception as e:
                 print(f"[SACRobotArmEnv] Error receiving obs: {e}")
-                time.sleep(0.1)
+                retry_count += 1
+                time.sleep(0.5)
+        
+        # If we get here, we failed to receive valid observations
+        raise RuntimeError("Failed to receive observations from bridge after multiple attempts. "
+                         "Is sac_bridge.py running and receiving data from ROS?")
 
     def _obs_dict_to_array(self, obs_dict):
         """
         Convert observation dictionary to flat numpy array.
-        Format: [arm_joints(6), actual_pose(7), wrist(1), gripper(1), contacts(2)]
+        MASKED VERSION: Only uses [arm_joints(6), actual_pose(7)] = 13 dims
         """
-        # Handle missing block_pose by using zeros (same as Dreamer env)
-        if 'block_pose' not in obs_dict:
-            obs_dict['block_pose'] = [0.0] * 7
-        
         # Extract and flatten components
         arm_joints = np.array(obs_dict['arm_joints'][:6], dtype=np.float32)
         actual_pose = np.array(obs_dict['actual_pose'][:7], dtype=np.float32)
-        wrist = np.array([obs_dict['wrist_angle'][0]], dtype=np.float32)
-        gripper = np.array([obs_dict['gripper_state'][0]], dtype=np.float32)
-        left_contact = np.array([obs_dict['left_contact'][0]], dtype=np.float32)
-        right_contact = np.array([obs_dict['right_contact'][0]], dtype=np.float32)
         
-        # Concatenate into single observation vector
+        # Concatenate into single observation vector (MASKED - no wrist, gripper, contacts)
         obs = np.concatenate([
             arm_joints,
-            actual_pose,
-            wrist,
-            gripper,
-            left_contact,
-            right_contact
+            actual_pose
         ])
         
         return obs
@@ -170,14 +216,31 @@ class SACRobotArmEnv(gym.Env):
         # Reset reward function state
         self.reward_fn.reset()
         
-        # Send reset command (send twice for reliability)
+        # Send reset command (send twice for reliability, like Dreamer)
         self.pub.send_string(json.dumps({"reset": True}))
         time.sleep(2.0)
         
         self.pub.send_string(json.dumps({"reset": True}))
         time.sleep(2.0)
         
-        # Receive initial observation
+        # Clear any stale messages from the socket (CRITICAL for ZMQ PUB/SUB)
+        print("[SACRobotArmEnv] Clearing stale messages...")
+        cleared = 0
+        self.sub.setsockopt(zmq.RCVTIMEO, 100)  # Short timeout for clearing
+        try:
+            while True:
+                self.sub.recv_string(flags=zmq.NOBLOCK)
+                cleared += 1
+        except zmq.Again:
+            pass
+        if cleared > 0:
+            print(f"[SACRobotArmEnv] Cleared {cleared} stale messages")
+        
+        # Restore normal timeout
+        self.sub.setsockopt(zmq.RCVTIMEO, 5000)
+        
+        # Now receive fresh observation
+        print("[SACRobotArmEnv] Waiting for fresh observation...")
         obs_dict = self._receive_obs()
         obs = self._obs_dict_to_array(obs_dict)
         
@@ -185,6 +248,8 @@ class SACRobotArmEnv(gym.Env):
         
         # Store dict for reward computation
         self.last_obs_dict = obs_dict
+        
+        print("[SACRobotArmEnv] Reset complete!")
         
         # Gymnasium requires returning (obs, info)
         info = {}
@@ -200,15 +265,20 @@ class SACRobotArmEnv(gym.Env):
         Returns:
             observation, reward, terminated, truncated, info
         """
+        # print(f"[SACRobotArmEnv] DEBUG: Step called")
         loop_start = time.time()
         
         # Ensure action is numpy array
         action = np.array(action, dtype=np.float32)
         
+        # Pad action with 0.0 for wrist and gripper: [dx, dy, dz, 0, 0]
+        full_action = np.concatenate([action, [0.0, 0.0]])
+        
         # Send action to bridge (raw normalized deltas)
         action_msg = {
-            "action": action.tolist()
+            "action": full_action.tolist()
         }
+        # print(f"[SACRobotArmEnv] DEBUG: Sending action: {action}") 
         self.pub.send_string(json.dumps(action_msg))
         
         # Rate limiting
@@ -228,10 +298,11 @@ class SACRobotArmEnv(gym.Env):
         self.step_count += 1
         
         # Check termination conditions
-        terminated = False  # Task success (could add distance threshold)
+        terminated = False  # Task success
         truncated = self.step_count >= self.max_episode_steps
         
         # Optional: Early termination on success
+        distance = None
         if 'actual_pose' in obs_dict:
             current_pos = np.array(obs_dict['actual_pose'][:3])
             target_pos = self.reward_fn.target_pos
@@ -244,7 +315,7 @@ class SACRobotArmEnv(gym.Env):
         
         info = {
             'step': self.step_count,
-            'distance': distance if 'distance' in locals() else None
+            'distance': distance
         }
         
         return obs, reward, terminated, truncated, info

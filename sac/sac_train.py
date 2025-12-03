@@ -59,7 +59,7 @@ class RewardLoggingCallback:
         return True
 
 
-def make_env(ip='127.0.0.1', port_sub=5558, port_pub=5559, hz=10.0):
+def make_env(ip='127.0.0.1', port_sub=5556, port_pub=5557, hz=10.0):
     """Create and wrap environment."""
     def _init():
         env = SACRobotArmEnv(ip=ip, port_sub=port_sub, port_pub=port_pub, hz=hz)
@@ -116,7 +116,7 @@ def train_sac(args):
         'target_update_interval': 1,
         'verbose': 1,
         'device': args.device,
-        'tensorboard_log': log_dir,
+        # 'tensorboard_log': log_dir,
     }
     
     # Create SAC agent
@@ -135,23 +135,24 @@ def train_sac(args):
     model.set_logger(logger)
     
     # Setup callbacks
-    callbacks = []
-    
-    # Checkpoint callback - save model periodically
-    checkpoint_callback = CheckpointCallback(
-        save_freq=args.save_freq,
-        save_path=os.path.join(log_dir, 'checkpoints'),
-        name_prefix='sac_model',
-        save_replay_buffer=True,
-        save_vecnormalize=True,
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Reward logging callback
-    reward_callback = RewardLoggingCallback(log_dir)
-    callbacks.append(reward_callback)
-    
-    callback = CallbackList(callbacks)
+    # NOTE: Callbacks are disabled due to compatibility issues
+    # callbacks = []
+    # 
+    # # Checkpoint callback - save model periodically
+    # checkpoint_callback = CheckpointCallback(
+    #     save_freq=args.save_freq,
+    #     save_path=os.path.join(log_dir, 'checkpoints'),
+    #     name_prefix='sac_model',
+    #     save_replay_buffer=True,
+    #     save_vecnormalize=True,
+    # )
+    # callbacks.append(checkpoint_callback)
+    # 
+    # # Reward logging callback
+    # reward_callback = RewardLoggingCallback(log_dir)
+    # callbacks.append(reward_callback)
+    # 
+    # callback = CallbackList(callbacks)
     
     # Train
     print("\n" + "="*60)
@@ -161,9 +162,9 @@ def train_sac(args):
     try:
         model.learn(
             total_timesteps=args.total_timesteps,
-            callback=callback,
-            log_interval=10,
-            progress_bar=True
+            # callback=callback,  # Disabled due to compatibility issues
+            log_interval=1,
+            progress_bar=False
         )
         
         # Save final model
@@ -199,9 +200,9 @@ def main():
     # Environment args
     parser.add_argument('--ip', type=str, default='127.0.0.1',
                         help='IP address of ZMQ bridge')
-    parser.add_argument('--port-sub', type=int, default=5558,
+    parser.add_argument('--port-sub', type=int, default=5556,
                         help='Port to subscribe to observations')
-    parser.add_argument('--port-pub', type=int, default=5559,
+    parser.add_argument('--port-pub', type=int, default=5557,
                         help='Port to publish actions')
     parser.add_argument('--hz', type=float, default=10.0,
                         help='Control frequency (Hz)')
