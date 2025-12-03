@@ -133,7 +133,7 @@ class SACRosBridge(Node):
         self.current_gripper = 0.0
         
         # Action scaling (same as Dreamer)
-        self.position_delta_scale = 0.005  # 5mm
+        self.position_delta_scale = 0.01  # 5mm
         self.wrist_delta_scale = 2.0       # 2°
         
         # Debug tracking

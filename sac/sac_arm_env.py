@@ -66,7 +66,7 @@ class SACRobotArmEnv(gym.Env):
         self.rate_duration = 1.0 / hz
         
         # Action scaling (same as Dreamer)
-        self.action_scale = np.array([0.005, 0.005, 0.005, 2.0, 1.0])
+        self.action_scale = np.array([0.01, 0.01, 0.01, 2.0, 1.0])
         
         # Workspace limits (must match bridge!)
         self.pos_min = np.array([-0.2, 0.15, 0.2])
