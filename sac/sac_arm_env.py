@@ -215,42 +215,52 @@ class SACRobotArmEnv(gym.Env):
         # Reset reward function state
         self.reward_fn.reset()
         
-        # Send reset command (send twice for reliability, like Dreamer)
+        # --- 1. Send reset command (Remove fixed sleeps) ---
+        # The bridge handles the ROS-side timing (4.0s total in your bridge file)
         self.pub.send_string(json.dumps({"reset": True}))
-        time.sleep(2.0)
+        # Optional: Send a second time to ensure the command is picked up.
+        # self.pub.send_string(json.dumps({"reset": True}))
         
-        self.pub.send_string(json.dumps({"reset": True}))
-        time.sleep(2.0)
+        # Wait a very short moment for the command to be processed by the bridge
+        time.sleep(0.1) # 100ms wait
         
-        # Clear any stale messages from the socket (CRITICAL for ZMQ PUB/SUB)
-        print("[SACRobotArmEnv] Clearing stale messages...")
-        cleared = 0
-        self.sub.setsockopt(zmq.RCVTIMEO, 100)  # Short timeout for clearing
-        try:
-            while True:
-                self.sub.recv_string(flags=zmq.NOBLOCK)
-                cleared += 1
-        except zmq.Again:
-            pass
-        if cleared > 0:
-            print(f"[SACRobotArmEnv] Cleared {cleared} stale messages")
+        # --- 2. Clear all observations BEFORE and DURING the reset motion ---
+        # This is CRITICAL. We must clear all old poses AND the transient poses
+        # that the arm generates as it moves to the start position.
+        print("[SACRobotArmEnv] Clearing stale/transient messages...")
         
-        # Restore normal timeout
+        # Temporarily set a short timeout for the duration of the expected reset time (~4.0s)
+        # We will poll repeatedly during this window to clear everything.
+        self.sub.setsockopt(zmq.RCVTIMEO, 100) # 100ms timeout
+        
+        clear_start_time = time.time()
+        timeout_duration = 4.5 # The bridge resets for 3.5s, give it a little more time
+        
+        # Continuously poll and clear the socket until the motion is expected to be complete
+        while (time.time() - clear_start_time) < timeout_duration:
+             try:
+                # Read without blocking until it times out (100ms)
+                self.sub.recv_string()
+             except zmq.Again:
+                # If timeout occurs, wait a moment and try again until total time is reached
+                time.sleep(0.1)
+                
+        # --- 3. Receive the guaranteed fresh observation ---
+        # Restore normal timeout (5 seconds)
         self.sub.setsockopt(zmq.RCVTIMEO, 5000)
         
-        # Now receive fresh observation
-        print("[SACRobotArmEnv] Waiting for fresh observation...")
-        obs_dict = self._receive_obs()
+        # This will now block and wait for the very first observation published 
+        # *after* the arm has finished its reset motion and the bridge 
+        # re-enabled publishing.
+        print("[SACRobotArmEnv] Waiting for first post-reset observation...")
+        obs_dict = self._receive_obs(clear_stale=False) # Do not clear stale messages here!
         obs = self._obs_dict_to_array(obs_dict)
         
         self.step_count = 0
-        
-        # Store dict for reward computation
         self.last_obs_dict = obs_dict
         
-        print("[SACRobotArmEnv] Reset complete!")
+        print("[SACRobotArmEnv] Reset complete and current pose confirmed!")
         
-        # Gymnasium requires returning (obs, info)
         info = {}
         return obs, info
 

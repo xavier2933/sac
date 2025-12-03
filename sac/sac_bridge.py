@@ -110,6 +110,11 @@ class SACRosBridge(Node):
         # Observation cache for ZMQ
         self.obs_cache = {} 
 
+        # === Reset State Management ===
+        self.is_resetting = False
+        self.reset_timer = None
+        self.reset_start_time = None
+        
         # === ZeroMQ Setup ===
         ctx = zmq.Context()
         # Bridge publishes observations on 5558
@@ -195,28 +200,22 @@ class SACRosBridge(Node):
     # === Observation Callbacks ===
     
     def cb_joint_states(self, msg: JointState):
-        current_time = self.get_clock().now()
         data = list(msg.position[:6])  # Only first 6 joints
         self.obs_cache["arm_joints"] = data
         self.data_cache["arm_joints"] = data
-        self.log_observation(current_time)
         if "arm_joints" not in self.received_topics:
             self.received_topics.add("arm_joints")
             self.get_logger().info("✓ Receiving arm_joints")
     
     def cb_block_pose(self, msg: Pose):
-        current_time = self.get_clock().now()
         data = pose_to_array(msg)
         self.obs_cache["block_pose"] = data
         self.data_cache["block_pose"] = data
-        self.log_observation(current_time)
         if "block_pose" not in self.received_topics:
             self.received_topics.add("block_pose")
             self.get_logger().info("✓ Receiving block_pose")
     
     def cb_actual_pose(self, msg: Pose):
-        current_time = self.get_clock().now()
-        
         # Transform ROS -> Unity frame
         ros_p = msg.position
         unity_x = -ros_p.y
@@ -229,13 +228,11 @@ class SACRosBridge(Node):
         self.obs_cache["actual_pose"] = data
         self.data_cache["actual_pose"] = data
         
-        self.log_observation(current_time)
         if "actual_pose" not in self.received_topics:
             self.received_topics.add("actual_pose")
             self.get_logger().info("✓ Receiving actual_pose")
     
     def cb_wrist_angle(self, msg: Float32):
-        current_time = self.get_clock().now()
         data = [msg.data]
         self.obs_cache["wrist_angle"] = data
         self.data_cache["wrist_angle"] = data
@@ -244,95 +241,130 @@ class SACRosBridge(Node):
             self.current_wrist = msg.data
             self.get_logger().info(f"✓ Initialized start wrist: {self.current_wrist:.1f}")
         
-        self.log_observation(current_time)
         if "wrist_angle" not in self.received_topics:
             self.received_topics.add("wrist_angle")
             self.get_logger().info("✓ Receiving wrist_angle")
     
     def cb_gripper_state(self, msg: Bool):
-        current_time = self.get_clock().now()
         data = [float(msg.data)]
         self.obs_cache["gripper_state"] = data
         self.data_cache["gripper_state"] = data
-        self.log_observation(current_time)
         if "gripper_state" not in self.received_topics:
             self.received_topics.add("gripper_state")
             self.get_logger().info("✓ Receiving gripper_state")
     
     def cb_left_contact(self, msg: Bool):
-        current_time = self.get_clock().now()
         data = [float(msg.data)]
         self.obs_cache["left_contact"] = data
         self.data_cache["left_contact"] = data
-        self.log_observation(current_time)
         if "left_contact" not in self.received_topics:
             self.received_topics.add("left_contact")
             self.get_logger().info("✓ Receiving left_contact")
     
     def cb_right_contact(self, msg: Bool):
-        current_time = self.get_clock().now()
         data = [float(msg.data)]
         self.obs_cache["right_contact"] = data
         self.data_cache["right_contact"] = data
-        self.log_observation(current_time)
         if "right_contact" not in self.received_topics:
             self.received_topics.add("right_contact")
             self.get_logger().info("✓ Receiving right_contact")
 
+    # === Reset Handling ===
+    
+    def start_reset_sequence(self):
+        """Initialize the reset sequence without blocking."""
+        self.is_resetting = True
+        self.reset_start_time = self.get_clock().now()
+        
+        # 1. Disable autonomous mode immediately
+        false_msg = Bool()
+        false_msg.data = False
+        self.pub_aut.publish(false_msg)
+        
+        # 2. Schedule reset signal for 0.5 seconds from now
+        self.reset_signal_timer = self.create_timer(0.5, self.send_reset_signal)
+        
+        self.get_logger().info("↻ Reset sequence started (autonomous mode disabled)")
+    
+    def send_reset_signal(self):
+        """Send the actual reset command (called 0.5s after reset starts)."""
+        # Destroy the timer so it only fires once
+        if hasattr(self, 'reset_signal_timer'):
+            self.destroy_timer(self.reset_signal_timer)
+            self.reset_signal_timer = None
+        
+        reset_msg = Bool()
+        reset_msg.data = True
+        self.pub_reset.publish(reset_msg)
+        self.get_logger().info("↻ Reset signal sent")
+    
+    def check_reset_complete(self):
+        """Check if 3.5 seconds have elapsed since reset started."""
+        if not self.is_resetting:
+            return
+        
+        elapsed = (self.get_clock().now() - self.reset_start_time).nanoseconds / 1e9
+        
+        if elapsed >= 3.5:
+            # Re-enable autonomous mode
+            true_msg = Bool()
+            true_msg.data = True
+            self.pub_aut.publish(true_msg)
+            
+            # Re-initialize start pose from current TF instead of clearing
+            if not self.get_start_pose():
+                self.get_logger().warn("⚠️ Could not get start pose from TF after reset, will retry")
+                self.current_target_pos = None
+                self.current_wrist = None
+            
+            self.current_gripper = 0.0
+            
+            self.is_resetting = False
+            self.get_logger().info("↻ Reset complete - accepting actions again")
+
     # --- Timer and Action Publishing ---
     
     def timer_callback(self):
+        # Check if reset is complete
+        self.check_reset_complete()
+        
         # Try to initialize start pose if not done yet
         if self.current_target_pos is None:
             self.get_start_pose()
 
-        # Send observations to SAC - EXACTLY like Dreamer
+        # Send observations to SAC - ALWAYS, even during reset
         if self.obs_cache:
             msg = json.dumps(self.obs_cache)
             self.pub.send_string(msg)
             
+            # Log complete observations only when sending to SAC
             required = ["arm_joints", "actual_pose"]
-            if all(k in self.obs_cache for k in required) and "_logged_complete" not in self.received_topics:
-                self.get_logger().info("✓ Sending observations to SAC (arm_joints + actual_pose)")
-                self.received_topics.add("_logged_complete")
+            if all(k in self.obs_cache for k in required):
+                current_time = self.get_clock().now()
+                self.log_observation(current_time)
+                
+                if "_logged_complete" not in self.received_topics:
+                    self.get_logger().info("✓ Sending observations to SAC (arm_joints + actual_pose)")
+                    self.received_topics.add("_logged_complete")
 
         # Receive actions from SAC agent
         try:
             while self.sub.poll(timeout=0):
                 msg_str = self.sub.recv_string(flags=zmq.NOBLOCK)
-                # print(f"[Bridge] DEBUG: Received message: {msg_str}")
                 data = json.loads(msg_str)
                 
+                # Handle reset command
                 if "reset" in data and data["reset"]:
-                    reset_msg = Bool()
-                    reset_msg.data = True
-                    false_msg = Bool()
-                    false_msg.data = False
-
-                    # 1. Publish false immediately
-                    self.pub_aut.publish(false_msg)
-
-                    # 2. Wait 0.5 seconds
-                    time.sleep(0.5)
-
-                    # 3. Publish TRUE reset
-                    self.pub_reset.publish(reset_msg)
-                    self.get_logger().info("↻ Reset command sent")
-
-                    # 4. Wait 3 seconds before allowing actions again
-                    time.sleep(3.0)
-                    self.pub_aut.publish(reset_msg)
-
-                    # 5. Clear states to force re-sync
-                    self.current_target_pos = None
-                    self.current_wrist = None
-                    self.current_gripper = 0.0
-
-                    self.get_logger().info("↻ Reset complete - observations will continue") 
+                    self.start_reset_sequence()
+                    continue
                     
-                if "action" in data:
+                # Process actions only if not resetting
+                if "action" in data and not self.is_resetting:
                     action = np.array(data["action"], dtype=np.float32)
                     self.publish_actions(action)
+                elif "action" in data and self.is_resetting:
+                    self.get_logger().debug("⏸ Ignoring action during reset")
+                    
         except zmq.Again:
             pass
 
